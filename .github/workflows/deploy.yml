@@ -1,0 +1,67 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  GO_VERSION: '1.22'
+  PROJECT_ID: ${{ secrets.GCP_PROJECT }}
+  REGION: ${{ secrets.CLOUD_RUN_REGION }}
+  SERVICE: ${{ secrets.CLOUD_RUN_SERVICE }}
+  REGISTRY_HOST: ${{ secrets.ARTIFACT_REGISTRY_HOST }}
+  IMAGE: ${{ secrets.ARTIFACT_REGISTRY_HOST }}/${{ secrets.GCP_PROJECT }}/pdf2jpg/pdf2jpg:${{ github.sha }}
+  CACHE_IMAGE: ${{ secrets.ARTIFACT_REGISTRY_HOST }}/${{ secrets.GCP_PROJECT }}/pdf2jpg/pdf2jpg:buildcache
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Run tests (go mod tidy → build → install included)
+        run: make test
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.DEPLOYER_SERVICE_ACCOUNT }}
+
+      - name: Configure Docker authentication
+        run: gcloud auth configure-docker ${{ env.REGISTRY_HOST }} -q
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push container
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }},mode=max
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE }} \
+            --project ${{ env.PROJECT_ID }} \
+            --region ${{ env.REGION }} \
+            --image ${{ env.IMAGE }} \
+            --allow-unauthenticated \
+            --set-env-vars PORT=8080 \
+            --set-secrets API_KEYS=projects/${{ env.PROJECT_ID }}/secrets/pdf2jpg-api-key:latest

@@ -1,0 +1,10 @@
+# Local Go build caches (created for sandbox-friendly go test)
+.gocache/
+.gomodcache/
+.gotmp/
+bin/
+
+# Editor/OS artifacts
+.DS_Store
+Thumbs.db
+*.swp
