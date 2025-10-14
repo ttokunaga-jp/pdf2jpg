@@ -5,7 +5,7 @@ substitutions:
   _REPOSITORY: us-central1-docker.pkg.dev/$PROJECT_ID/pdf2jpg/pdf2jpg
 
 steps:
-  - name: golang:1.22-bookworm
+  - name: golang:1.25.2-bookworm
     entrypoint: bash
     args:
       - -c

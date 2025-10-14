@@ -1,28 +1,17 @@
 # syntax=docker/dockerfile:1.7
 
-FROM golang:1.22-bookworm AS builder
+FROM golang:1.25.2-bookworm AS builder
 
 WORKDIR /workspace
 
-# Enable Go module proxy caching
 COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+RUN go mod download
 
 COPY . .
 
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    go mod tidy
-
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    go build ./...
-
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    GOBIN=/workspace/bin go install ./cmd
+RUN go mod tidy
+RUN go build ./...
+RUN GOBIN=/workspace/bin go install ./cmd
 
 RUN mv /workspace/bin/cmd /workspace/bin/main
 
