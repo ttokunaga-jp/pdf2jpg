@@ -14,6 +14,7 @@ env:
   REGISTRY_HOST: ${{ secrets.ARTIFACT_REGISTRY_HOST }}
   IMAGE: ${{ secrets.ARTIFACT_REGISTRY_HOST }}/${{ secrets.GCP_PROJECT }}/pdf2jpg/pdf2jpg:${{ github.sha }}
   CACHE_IMAGE: ${{ secrets.ARTIFACT_REGISTRY_HOST }}/${{ secrets.GCP_PROJECT }}/pdf2jpg/pdf2jpg:buildcache
+  API_KEY_SECRET: ${{ secrets.CLOUD_RUN_API_SECRET_NAME }}
 
 jobs:
   build-and-deploy:
@@ -58,10 +59,14 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
+          if [ -z "${{ env.API_KEY_SECRET }}" ]; then
+            echo "Missing CLOUD_RUN_API_SECRET_NAME secret" >&2
+            exit 1
+          fi
           gcloud run deploy ${{ env.SERVICE }} \
             --project ${{ env.PROJECT_ID }} \
             --region ${{ env.REGION }} \
             --image ${{ env.IMAGE }} \
             --allow-unauthenticated \
             --set-env-vars PORT=8080 \
-            --set-secrets API_KEYS=projects/${{ env.PROJECT_ID }}/secrets/pdf2jpg-api-key:latest
+            --set-secrets API_KEYS=projects/${{ env.PROJECT_ID }}/secrets/${{ env.API_KEY_SECRET }}:latest
