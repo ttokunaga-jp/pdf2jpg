@@ -68,5 +68,4 @@ jobs:
             --region ${{ env.REGION }} \
             --image ${{ env.IMAGE }} \
             --allow-unauthenticated \
-            --set-env-vars PORT=8080 \
             --set-secrets API_KEYS=${{ env.API_KEY_SECRET }}:latest
