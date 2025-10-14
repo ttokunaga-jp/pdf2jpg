@@ -1,5 +1,6 @@
 # pdf2jpg
 
+
 ## Testing
 
 Use the provided `Makefile` to run tests. The targets automatically create local cache directories required for Go tooling in restricted environments such as WSL sandboxing.
