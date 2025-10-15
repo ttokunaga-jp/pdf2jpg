@@ -3,6 +3,7 @@
 .gomodcache/
 .gotmp/
 bin/
+.env
 
 # Editor/OS artifacts
 .DS_Store

@@ -46,9 +46,10 @@ make test
 
 ## Local Development
 
-1. テスト用 API キーを環境変数に設定（カンマ区切りで複数指定可能）  
+1. `.env` を用意（必要なら編集）  
    ```bash
-   export API_KEYS=59fd7eb3a9826c832643fcfb42f45cc4a8e677e6b4a35887f3b3a0ea9d59ab08
+   cp .env.example .env
+   # 必要に応じて API_KEYS を編集
    ```
 2. サーバー起動  
    ```bash
@@ -57,8 +58,9 @@ make test
    make install
    ./bin/main
    ```
-3. 動作確認  
+3. 動作確認（必要なら `source .env` でシェルにも取り込む）  
    ```bash
+   source .env
    curl -H "X-API-Key: ${API_KEYS}" \
         -F "file=@sample.pdf" \
         http://localhost:8080/convert \
@@ -79,7 +81,7 @@ make e2e    # test/e2e_test.go のみ実行
 docker build -t pdf2jpg:local .
 
 docker run --rm -p 8080:8080 \
-  -e API_KEYS=59fd7eb3a9826c832643fcfb42f45cc4a8e677e6b4a35887f3b3a0ea9d59ab08 \
+  -e API_KEYS=pdf2jpg-api-key-local-20251015 \
   pdf2jpg:local
 ```
 

@@ -9,7 +9,9 @@
 ### サンプル
 
 ```bash
-export API_KEYS=59fd7eb3a9826c832643fcfb42f45cc4a8e677e6b4a35887f3b3a0ea9d59ab08
+cp .env.example .env
+# 必要に応じて .env の API_KEYS を編集
+source .env
 curl -H "X-API-Key: ${API_KEYS}" \
      -F "file=@sample.pdf" http://localhost:8080/convert
 ```
@@ -20,7 +22,7 @@ Cloud Run では Secret Manager に格納した API キーを環境変数へバ�
 
 1. **シークレット登録**
    ```bash
-   echo -n "59fd..." | gcloud secrets create pdf2jpg-api-key --data-file=- --replication-policy=automatic
+   echo -n "<YOUR_API_KEY>" | gcloud secrets create pdf2jpg-api-key --data-file=- --replication-policy=automatic
    ```
 2. **Cloud Run 実行サービスアカウントへの権限付与**
    ```bash

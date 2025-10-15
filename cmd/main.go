@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -24,6 +27,10 @@ const (
 
 func main() {
 	logger := log.New(os.Stdout, "", log.LstdFlags|log.LUTC)
+
+	if err := loadEnvFile(".env", logger); err != nil {
+		logger.Fatalf("ERROR: %v", err)
+	}
 
 	apiKeys := parseAPIKeys(os.Getenv("API_KEYS"))
 	if len(apiKeys) == 0 {
@@ -109,6 +116,53 @@ func loggingMiddleware(logger *log.Logger) func(http.Handler) http.Handler {
 			logger.Printf("INFO: method=%s path=%s status=%d duration=%s", r.Method, r.URL.Path, rec.status, time.Since(start))
 		})
 	}
+}
+
+func loadEnvFile(path string, logger *log.Logger) error {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			logger.Printf("INFO: env file %s not found, skipping", path)
+			return nil
+		}
+		return fmt.Errorf("open env file %q: %w", path, err)
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	scanner := bufio.NewScanner(file)
+	lineNum := 0
+
+	for scanner.Scan() {
+		lineNum++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, found := strings.Cut(line, "=")
+		if !found {
+			logger.Printf("WARN: skipping malformed env line %d in %s", lineNum, path)
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+		if err := os.Setenv(key, value); err != nil {
+			return fmt.Errorf("set env %q from %s: %w", key, path, err)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("read env file %q: %w", path, err)
+	}
+
+	logger.Printf("INFO: loaded environment from %s", path)
+	return nil
 }
 
 type statusRecorder struct {
