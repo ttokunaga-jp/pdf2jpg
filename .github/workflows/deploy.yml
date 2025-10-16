@@ -68,4 +68,5 @@ jobs:
             --region ${{ env.REGION }} \
             --image ${{ env.IMAGE }} \
             --allow-unauthenticated \
-            --set-secrets API_KEYS=${{ env.API_KEY_SECRET }}:latest
+            --set-secrets API_KEYS=${{ env.API_KEY_SECRET }}:latest 
+  --set-secrets MASTER_API_KEYS=${{ secrets.CLOUD_RUN_MASTER_SECRET_NAME }}:latest
