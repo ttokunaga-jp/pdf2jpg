@@ -140,10 +140,12 @@ docker compose run --rm test
        --member="serviceAccount:${SERVICE_ACCOUNT}" \
        --role="roles/secretmanager.secretAccessor"
      ```
-  3. Secret Manager に API キーと管理キーを登録します。
+  3. Secret Manager に API キーと管理キーを登録します（実際には十分な長さのランダム値を使用）。
      ```bash
-     echo -n "client-key-1,client-key-2" | gcloud secrets create pdf2jpg-api-key --replication-policy=automatic --data-file=-
-     echo -n "admin-key-1" | gcloud secrets create pdf2jpg-master-api-keys --replication-policy=automatic --data-file=-
+     CLIENT_KEYS="$(openssl rand -hex 32),$(openssl rand -hex 32)"
+     ADMIN_KEYS="$(openssl rand -hex 32),$(openssl rand -hex 32)"
+     printf '%s' "${CLIENT_KEYS}" | gcloud secrets create pdf2jpg-api-key --replication-policy=automatic --data-file=-
+     printf '%s' "${ADMIN_KEYS}" | gcloud secrets create pdf2jpg-master-api-keys --replication-policy=automatic --data-file=-
      ```
 
 - Cloud Run で指定する推奨オプション
@@ -181,6 +183,44 @@ MASTER_API_KEYS=projects/${PROJECT_ID}/secrets/pdf2jpg-master-api-keys:latest \
 
 レスポンスにはメトリクス (`/debug/vars`) で確認可能な `api_key_issue_total`・`api_key_validation_total`・`temporary_keys_active` が更新されます。
 
+### Secret Rotation & Verification
+
+- 管理キーをローテーションする際は、Secret Manager に新しいバージョンを追加します。
+  ```bash
+  printf '%s' "$(openssl rand -hex 32),$(openssl rand -hex 32)" | \
+    gcloud secrets versions add pdf2jpg-master-api-keys \
+      --project ${PROJECT_ID} \
+      --data-file=-
+  ```
+- Cloud Run が最新バージョンを読むように再デプロイします（既存の設定値も合わせて指定）。
+  ```bash
+  IMAGE=$(gcloud run services describe pdf2jpg-api \
+    --project ${PROJECT_ID} \
+    --region ${REGION} \
+    --format='value(status.latestReadyRevision.spec.containers[0].image)')
+
+  gcloud run deploy pdf2jpg-api \
+    --project ${PROJECT_ID} \
+    --region ${REGION} \
+    --image "${IMAGE}" \
+    --set-secrets API_KEYS=pdf2jpg-api-key:latest,MASTER_API_KEYS=pdf2jpg-master-api-keys:latest \
+    --set-env-vars ENABLE_FIRESTORE_KEYS=true,FIRESTORE_PROJECT_ID=${PROJECT_ID},FIRESTORE_COLLECTION=apiKeys \
+    --allow-unauthenticated
+  ```
+- 参照しているバージョンは次のコマンドで確認できます。
+  ```bash
+  REVISION=$(gcloud run services describe pdf2jpg-api \
+    --project ${PROJECT_ID} \
+    --region ${REGION} \
+    --format='value(status.latestReadyRevisionName)')
+
+  gcloud run revisions describe "${REVISION}" \
+    --project ${PROJECT_ID} \
+    --region ${REGION} \
+    --format='value(spec.containers[0].env[?name=="MASTER_API_KEYS"].valueSource.secretKeyRef.version)'
+  ```
+- 管理 API (`/admin/api-keys` など) に新しいキーでアクセスして 200 が返り、旧キーが 401 になることを必ず確認してください。
+
 ## Docker Usage
 
 ```bash
@@ -203,9 +243,11 @@ IMAGE=asia-northeast3-docker.pkg.dev/${PROJECT_ID}/pdf2jpg/pdf2jpg:$(git rev-par
 # Artifact Registry へビルド & プッシュ
 gcloud builds submit --tag "${IMAGE}"
 
-# Secret Manager に API キー / 管理キーを登録（初回のみ）
-echo -n "59fd..." | gcloud secrets create pdf2jpg-api-key --data-file=- --replication-policy=automatic
-echo -n "admin-master-key" | gcloud secrets create pdf2jpg-master-api-keys --data-file=- --replication-policy=automatic
+# Secret Manager に API キー / 管理キーを登録（初回のみ・値は必ず置き換える）
+printf '%s' "$(openssl rand -hex 32),$(openssl rand -hex 32)" | \
+  gcloud secrets create pdf2jpg-api-key --data-file=- --replication-policy=automatic
+printf '%s' "$(openssl rand -hex 32),$(openssl rand -hex 32)" | \
+  gcloud secrets create pdf2jpg-master-api-keys --data-file=- --replication-policy=automatic
 
 # Cloud Run へデプロイ
 gcloud run deploy pdf2jpg-api \
