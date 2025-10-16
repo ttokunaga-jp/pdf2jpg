@@ -1,0 +1,64 @@
+services:
+  firestore-emulator:
+    build:
+      context: .
+      dockerfile: docker/firestore.Dockerfile
+    container_name: pdf2jpg-firestore-emulator
+    restart: unless-stopped
+    environment:
+      FIRESTORE_PROJECT_ID: demo-project
+    command: >
+      bash -c "
+        set -euo pipefail &&
+        gcloud config set project ${FIRESTORE_PROJECT_ID:-demo-project} >/dev/null &&
+        gcloud config set auth/disable_credentials true >/dev/null &&
+        gcloud beta emulators firestore start --host-port=0.0.0.0:8080 --quiet
+      "
+    ports:
+      - "8200:8080"
+
+  app:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      API_KEYS: demo-static-key
+      MASTER_API_KEYS: demo-master-key
+      ENABLE_FIRESTORE_KEYS: "true"
+      FIRESTORE_PROJECT_ID: demo-project
+      FIRESTORE_COLLECTION: apiKeys
+      FIRESTORE_EMULATOR_HOST: firestore-emulator:8080
+      GOOGLE_CLOUD_PROJECT: demo-project
+    depends_on:
+      - firestore-emulator
+    ports:
+      - "8080:8080"
+
+  test:
+    build:
+      context: .
+      target: dev
+    working_dir: /workspace
+    environment:
+      API_KEYS: demo-static-key
+      MASTER_API_KEYS: demo-master-key
+      ENABLE_FIRESTORE_KEYS: "true"
+      FIRESTORE_PROJECT_ID: demo-project
+      FIRESTORE_COLLECTION: apiKeys
+      FIRESTORE_EMULATOR_HOST: firestore-emulator:8080
+      GOOGLE_CLOUD_PROJECT: demo-project
+    volumes:
+      - .:/workspace
+    depends_on:
+      - firestore-emulator
+    command: >
+      bash -c "
+        mkdir -p /workspace/.gocache /workspace/.gomodcache /workspace/.gotmp &&
+        until nc -z firestore-emulator 8080; do
+          echo 'waiting for firestore emulator...';
+          sleep 1;
+        done &&
+        GOCACHE=/workspace/.gocache GOMODCACHE=/workspace/.gomodcache GOTMPDIR=/workspace/.gotmp go test ./... -count=1
+      "
