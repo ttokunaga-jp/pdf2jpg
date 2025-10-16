@@ -15,6 +15,7 @@ env:
   IMAGE: ${{ secrets.ARTIFACT_REGISTRY_HOST }}/${{ secrets.GCP_PROJECT }}/pdf2jpg/pdf2jpg:${{ github.sha }}
   CACHE_IMAGE: ${{ secrets.ARTIFACT_REGISTRY_HOST }}/${{ secrets.GCP_PROJECT }}/pdf2jpg/pdf2jpg:buildcache
   API_KEY_SECRET: ${{ secrets.CLOUD_RUN_API_SECRET_NAME }}
+  MASTER_API_SECRET: ${{ secrets.CLOUD_RUN_MASTER_SECRET_NAME }}
 
 jobs:
   build-and-deploy:
@@ -63,10 +64,15 @@ jobs:
             echo "Missing CLOUD_RUN_API_SECRET_NAME secret" >&2
             exit 1
           fi
+          if [ -z "${{ env.MASTER_API_SECRET }}" ]; then
+            echo "Missing CLOUD_RUN_MASTER_SECRET_NAME secret" >&2
+            exit 1
+          fi
           gcloud run deploy ${{ env.SERVICE }} \
             --project ${{ env.PROJECT_ID }} \
             --region ${{ env.REGION }} \
             --image ${{ env.IMAGE }} \
             --allow-unauthenticated \
             --set-secrets API_KEYS=${{ env.API_KEY_SECRET }}:latest \
-            --set-secrets MASTER_API_KEYS=${{ secrets.CLOUD_RUN_MASTER_SECRET_NAME }}:latest
+            --set-secrets MASTER_API_KEYS=${{ env.MASTER_API_SECRET }}:latest \
+            --set-env-vars ENABLE_FIRESTORE_KEYS=true,FIRESTORE_PROJECT_ID=${{ env.PROJECT_ID }},FIRESTORE_COLLECTION=apiKeys
