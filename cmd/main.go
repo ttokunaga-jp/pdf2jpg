@@ -48,29 +48,38 @@ func main() {
 
 	enableFirestore := parseBoolEnv("ENABLE_FIRESTORE_KEYS", true)
 
-	firestoreProject := os.Getenv("FIRESTORE_PROJECT_ID")
-	if firestoreProject == "" {
-		firestoreProject = os.Getenv("GOOGLE_CLOUD_PROJECT")
+	var (
+		firestoreClient *firestore.Client
+		keyService      *auth.KeyService
+	)
+	if enableFirestore {
+		firestoreProject := os.Getenv("FIRESTORE_PROJECT_ID")
+		if firestoreProject == "" {
+			firestoreProject = os.Getenv("GOOGLE_CLOUD_PROJECT")
+		}
+		if firestoreProject == "" {
+			logger.Fatal("missing FIRESTORE_PROJECT_ID environment variable")
+		}
+		firestoreCollection := os.Getenv("FIRESTORE_COLLECTION")
+
+		ctx := context.Background()
+		var err error
+		firestoreClient, err = firestore.NewClient(ctx, firestoreProject)
+		if err != nil {
+			logger.Fatalf("ERROR: initialize firestore client: %v", err)
+		}
+		defer firestoreClient.Close()
+
+		repo := auth.NewFirestoreRepository(firestoreClient, firestoreCollection)
+		keyService = auth.NewKeyService(repo, logger, nil, auth.ServiceConfig{})
+	} else {
+		logger.Println("INFO: Firestore-backed temporary key verification disabled")
 	}
-	if firestoreProject == "" {
-		logger.Fatal("missing FIRESTORE_PROJECT_ID environment variable")
-	}
-	firestoreCollection := os.Getenv("FIRESTORE_COLLECTION")
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = defaultPort
 	}
-
-	ctx := context.Background()
-	firestoreClient, err := firestore.NewClient(ctx, firestoreProject)
-	if err != nil {
-		logger.Fatalf("ERROR: initialize firestore client: %v", err)
-	}
-	defer firestoreClient.Close()
-
-	repo := auth.NewFirestoreRepository(firestoreClient, firestoreCollection)
-	keyService := auth.NewKeyService(repo, logger, nil, auth.ServiceConfig{})
 
 	pdfService := service.NewPDFService(jpegQuality)
 	convertHandler := handler.NewConvertHandler(pdfService, logger, megabytesToBytes(maxUploadSizeMB))
@@ -83,12 +92,7 @@ func main() {
 		FeatureEnabled: enableFirestore,
 	})(convertHandler))
 
-	adminMux := http.NewServeMux()
-	handler.NewKeyAdminHandler(keyService, logger).Register(adminMux)
-	adminHandler := auth.AdminAuthMiddleware(auth.AdminMiddlewareConfig{
-		MasterKeys: masterKeys,
-		Logger:     logger,
-	})(adminMux)
+	adminHandler := buildAdminHandler(masterKeys, keyService, logger, enableFirestore)
 	mux.Handle("/admin/", adminHandler)
 	mux.Handle("/admin", adminHandler)
 
@@ -163,6 +167,21 @@ func parseBoolEnv(key string, defaultVal bool) bool {
 
 func megabytesToBytes(mb int64) int64 {
 	return mb * 1024 * 1024
+}
+
+func buildAdminHandler(masterKeys []string, keyService *auth.KeyService, logger *log.Logger, featureEnabled bool) http.Handler {
+	adminMux := http.NewServeMux()
+	if featureEnabled && keyService != nil {
+		handler.NewKeyAdminHandler(keyService, logger).Register(adminMux)
+	} else {
+		adminMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "temporary key management disabled", http.StatusServiceUnavailable)
+		})
+	}
+	return auth.AdminAuthMiddleware(auth.AdminMiddlewareConfig{
+		MasterKeys: masterKeys,
+		Logger:     logger,
+	})(adminMux)
 }
 
 func loggingMiddleware(logger *log.Logger) func(http.Handler) http.Handler {

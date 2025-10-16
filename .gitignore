@@ -4,6 +4,7 @@
 .gotmp/
 bin/
 .env
+.cache/
 
 # Editor/OS artifacts
 .DS_Store
