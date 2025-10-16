@@ -4,14 +4,18 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"expvar"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"cloud.google.com/go/firestore"
 
 	"pdf2jpg/internal/auth"
 	"pdf2jpg/internal/handler"
@@ -37,20 +41,62 @@ func main() {
 		logger.Fatal("missing API_KEYS environment variable")
 	}
 
+	masterKeys := parseAPIKeys(os.Getenv("MASTER_API_KEYS"))
+	if len(masterKeys) == 0 {
+		logger.Fatal("missing MASTER_API_KEYS environment variable")
+	}
+
+	enableFirestore := parseBoolEnv("ENABLE_FIRESTORE_KEYS", true)
+
+	firestoreProject := os.Getenv("FIRESTORE_PROJECT_ID")
+	if firestoreProject == "" {
+		firestoreProject = os.Getenv("GOOGLE_CLOUD_PROJECT")
+	}
+	if firestoreProject == "" {
+		logger.Fatal("missing FIRESTORE_PROJECT_ID environment variable")
+	}
+	firestoreCollection := os.Getenv("FIRESTORE_COLLECTION")
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = defaultPort
 	}
 
+	ctx := context.Background()
+	firestoreClient, err := firestore.NewClient(ctx, firestoreProject)
+	if err != nil {
+		logger.Fatalf("ERROR: initialize firestore client: %v", err)
+	}
+	defer firestoreClient.Close()
+
+	repo := auth.NewFirestoreRepository(firestoreClient, firestoreCollection)
+	keyService := auth.NewKeyService(repo, logger, nil, auth.ServiceConfig{})
+
 	pdfService := service.NewPDFService(jpegQuality)
 	convertHandler := handler.NewConvertHandler(pdfService, logger, megabytesToBytes(maxUploadSizeMB))
 
 	mux := http.NewServeMux()
-	mux.Handle("/convert", auth.APIKeyMiddleware(apiKeys, logger)(convertHandler))
+	mux.Handle("/convert", auth.APIKeyMiddleware(auth.APIKeyMiddlewareConfig{
+		StaticKeys:     apiKeys,
+		KeyService:     keyService,
+		Logger:         logger,
+		FeatureEnabled: enableFirestore,
+	})(convertHandler))
+
+	adminMux := http.NewServeMux()
+	handler.NewKeyAdminHandler(keyService, logger).Register(adminMux)
+	adminHandler := auth.AdminAuthMiddleware(auth.AdminMiddlewareConfig{
+		MasterKeys: masterKeys,
+		Logger:     logger,
+	})(adminMux)
+	mux.Handle("/admin/", adminHandler)
+	mux.Handle("/admin", adminHandler)
+
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.Handle("/debug/vars", expvar.Handler())
 
 	server := &http.Server{
 		Addr:    ":" + port,
@@ -101,6 +147,18 @@ func parseAPIKeys(raw string) []string {
 	}
 
 	return keys
+}
+
+func parseBoolEnv(key string, defaultVal bool) bool {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return defaultVal
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return defaultVal
+	}
+	return value
 }
 
 func megabytesToBytes(mb int64) int64 {

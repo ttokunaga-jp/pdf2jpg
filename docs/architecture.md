@@ -4,27 +4,23 @@
 ```
 pdf2jpg/
 ├── cmd/
-│   └── server/
-│       └── main.go
+│   └── main.go
 ├── internal/
 │   ├── auth/
-│   │   └── apikey.go
+│   │   ├── api_key.go
+│   │   ├── auth_middleware.go
+│   │   ├── admin_middleware.go
+│   │   ├── firestore_repository.go
+│   │   └── key_service.go
 │   ├── handler/
-│   │   └── convert.go
+│   │   ├── convert_handler.go
+│   │   └── admin_keys_handler.go
 │   ├── service/
-│   │   └── converter.go
+│   │   └── pdf_service.go
 │   └── util/
-│       ├── config/
-│       │   └── config.go
-│       ├── http/
-│       │   └── response.go
-│       └── logger/
-│           └── logger.go
+│       └── file_util.go
 ├── test/
-│   ├── e2e_convert_test.go
-│   └── fixtures/
-│       ├── valid.pdf
-│       └── invalid.pdf
+│   └── e2e_test.go
 ├── Dockerfile
 ├── Makefile
 ├── go.mod
@@ -33,26 +29,23 @@ pdf2jpg/
 ```
 
 ## 2. Module Responsibilities
-- **cmd/server**: Cloud Run entry point that loads configuration, wires dependencies, starts the HTTP server, and registers health checks with graceful shutdown.
-- **internal/handler**: Owns `POST /convert`, request validation, API key middleware, `http.MaxBytesReader` enforcement for the 10 MB limit, multipart parsing, and response writing.
+- **cmd/main.go**: Cloud Run entry point. Loads `.env`, initialises Firestore client, wires authentication middleware, admin handlers, health checks, and graceful shutdown.
+- **internal/handler**: Owns `POST /convert` と管理用 `/admin/api-keys` 系エンドポイント。入力バリデーション、レスポンス整形、HTTP エラーハンドリングを担う。
 - **internal/service**: Wraps go-fitz to convert the first page of PDFs to JPEG, manages `/tmp` files, enforces JPEG quality (85), and maps conversion errors to service-level errors.
-- **internal/auth**: Validates `X-API-Key` headers, supports multiple keys via configuration, and exposes middleware hooks for rate limiting and metrics (future use).
-- **internal/util**: Provides configuration loading (`config`), shared HTTP response helpers (`http`), and structured logging compatible with Cloud Logging (`logger`).
-- **test**: Contains end-to-end tests for the conversion flow and test fixtures for valid and invalid PDFs.
+- **internal/auth**: Provides authentication middlewares, temporary key lifecycle管理 (`KeyService`)、Firestore リポジトリ実装、管理者レートリミット、負荷軽減のためのキャッシュとメトリクス収集を実装。
+- **internal/util**: Utility helpers (currently file handling) をまとめ、他層から共有利用。
+- **test**: Contains end-to-end tests for the conversion flow, covering static API keys and temporary keys with usage limits.
 
 ### Dependency Graph
 ```
-cmd/server
- └─ internal/handler
-     ├─ internal/auth
-     ├─ internal/service
-     └─ internal/util/{config,logger,http}
-internal/service
- └─ internal/util/{logger}
+cmd/main.go
+ ├─ internal/handler
+ │    ├─ internal/auth
+ │    └─ internal/service
+ └─ internal/util
 internal/auth
- └─ internal/util/{config,logger}
-internal/util/*
- (referenced only by higher layers)
+ ├─ Firestore (cloud.google.com/go/firestore)
+ └─ go.opentelemetry.io/otel (trace spans)
 ```
 
 ## 3. OpenAPI Specification

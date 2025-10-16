@@ -1,60 +1,157 @@
 package auth
 
 import (
-	"encoding/json"
-	"io"
-	"log"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
+	"time"
 )
 
-func TestAPIKeyMiddleware_Authorized(t *testing.T) {
+func TestAPIKeyMiddleware_StaticKey(t *testing.T) {
+	middleware := APIKeyMiddleware(APIKeyMiddlewareConfig{
+		StaticKeys: []string{"static"},
+		Logger:     discardLogger,
+	})
+
 	var called bool
-	mw := APIKeyMiddleware([]string{"secret-key"}, log.New(io.Discard, "", 0))
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set(apiKeyHeader, "secret-key")
+	req.Header.Set(apiKeyHeader, "static")
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
 
 	if !called {
-		t.Fatal("expected wrapped handler to be called")
+		t.Fatal("expected handler to be called")
 	}
 	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", rec.Code)
+		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 }
 
-func TestAPIKeyMiddleware_Unauthorized(t *testing.T) {
-	logger := log.New(io.Discard, "", 0)
-	mw := APIKeyMiddleware([]string{"secret-key"}, logger)
-	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("handler should not be called")
+func TestAPIKeyMiddleware_TemporaryKeyAuthorized(t *testing.T) {
+	repo := newMemoryRepository()
+	service := NewKeyService(repo, discardLogger, nil, ServiceConfig{})
+	resp, err := service.IssueTemporaryKey(httptest.NewRequest("", "/", nil).Context(), IssueRequest{
+		Label:      "demo",
+		UsageLimit: 1,
+		TTL:        time.Hour,
+		Operator:   "operator",
+	})
+	if err != nil {
+		t.Fatalf("issue key: %v", err)
+	}
+
+	middleware := APIKeyMiddleware(APIKeyMiddlewareConfig{
+		KeyService:     service,
+		Logger:         discardLogger,
+		FeatureEnabled: true,
+	})
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodPost, "/convert", nil)
+	req.Header.Set(apiKeyHeader, resp.Key)
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
 
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	record, _, err := service.ValidateAndConsume(req.Context(), resp.Key)
+	if err == nil {
+		t.Fatalf("expected usage to be exhausted after second consume, got remaining %d", record.RemainingUsage)
+	}
+}
+
+func TestAPIKeyMiddleware_TemporaryKeyUnauthorized(t *testing.T) {
+	repo := newMemoryRepository()
+	service := NewKeyService(repo, discardLogger, nil, ServiceConfig{})
+
+	middleware := APIKeyMiddleware(APIKeyMiddlewareConfig{
+		KeyService:     service,
+		Logger:         discardLogger,
+		FeatureEnabled: true,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(apiKeyHeader, "missing-key")
+	rec := httptest.NewRecorder()
+
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("handler should not be called")
+	}))
+
+	handler.ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected status 401, got %d", rec.Code)
+		t.Fatalf("expected 401, got %d", rec.Code)
 	}
-	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
-		t.Fatalf("expected JSON content type, got %q", got)
+}
+
+func TestAPIKeyMiddleware_FirestoreError(t *testing.T) {
+	service := NewKeyService(&failingRepository{}, discardLogger, nil, ServiceConfig{})
+	middleware := APIKeyMiddleware(APIKeyMiddlewareConfig{
+		KeyService:     service,
+		Logger:         discardLogger,
+		FeatureEnabled: true,
+		RetryAfter:     3 * time.Second,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(apiKeyHeader, "dynamic")
+	rec := httptest.NewRecorder()
+
+	handler := middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("handler should not be called")
+	}))
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", rec.Code)
 	}
-	var body map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("failed to parse response: %v", err)
+	if rec.Header().Get("Retry-After") != "3" {
+		t.Fatalf("expected retry-after 3, got %s", rec.Header().Get("Retry-After"))
 	}
-	if body["error"] != "unauthorized" {
-		t.Fatalf("expected error message, got %q", body["error"])
-	}
+}
+
+type failingRepository struct{}
+
+func (f *failingRepository) CreateTemporaryKey(ctx context.Context, key APIKey) error {
+	return errors.New("not implemented")
+}
+
+func (f *failingRepository) Get(ctx context.Context, key string) (APIKey, error) {
+	return APIKey{}, errors.New("not implemented")
+}
+
+func (f *failingRepository) Consume(ctx context.Context, key string, now time.Time) (APIKey, error) {
+	return APIKey{}, errors.New("boom")
+}
+
+func (f *failingRepository) Revoke(ctx context.Context, key string, now time.Time) (APIKey, error) {
+	return APIKey{}, errors.New("not implemented")
+}
+
+func (f *failingRepository) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
+func (f *failingRepository) DeleteExpired(ctx context.Context, now time.Time, limit int) (int, error) {
+	return 0, nil
+}
+
+func (f *failingRepository) CountActive(ctx context.Context, now time.Time) (int, error) {
+	return 0, nil
 }

@@ -2,7 +2,9 @@ package test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,7 +49,7 @@ func (f *fakeDocument) Image(int) (image.Image, error) {
 
 func (f *fakeDocument) Close() error { return nil }
 
-func newTestServer(t *testing.T, opener func(string) (service.Document, error)) *httptest.Server {
+func newTestHandler(t *testing.T, opener func(string) (service.Document, error), keyService *auth.KeyService, enableDynamic bool) http.Handler {
 	t.Helper()
 
 	logger := log.New(io.Discard, "", 0)
@@ -56,28 +59,26 @@ func newTestServer(t *testing.T, opener func(string) (service.Document, error)) 
 	pdfService := service.NewPDFService(defaultJPEGQual)
 	convertHandler := handler.NewConvertHandler(pdfService, logger, maxUploadBytes)
 
-	mux := http.NewServeMux()
-	mux.Handle("/convert", auth.APIKeyMiddleware([]string{testAPIKey}, logger)(convertHandler))
-
-	return httptest.NewServer(mux)
+	return auth.APIKeyMiddleware(auth.APIKeyMiddlewareConfig{
+		StaticKeys:     []string{testAPIKey},
+		KeyService:     keyService,
+		Logger:         logger,
+		FeatureEnabled: enableDynamic,
+	})(convertHandler)
 }
 
 func TestConvertEndpoint(t *testing.T) {
 	successOpener := func(string) (service.Document, error) {
 		img := image.NewRGBA(image.Rect(0, 0, 1, 1))
 		img.Set(0, 0, color.RGBA{R: 255, A: 255})
-		return &fakeDocument{
-			pages: 1,
-			img:   img,
-		}, nil
+		return &fakeDocument{pages: 1, img: img}, nil
 	}
 
 	t.Run("success", func(t *testing.T) {
-		server := newTestServer(t, successOpener)
-		defer server.Close()
-
+		handler := newTestHandler(t, successOpener, nil, false)
 		body, contentType := createMultipartBody(t, expectedFileName, minimalPDF())
-		res := sendConvertRequest(t, server.URL, body, contentType, testAPIKey)
+		rec := sendConvertRequest(t, handler, body, contentType, testAPIKey)
+		res := rec.Result()
 		defer res.Body.Close()
 
 		if res.StatusCode != http.StatusOK {
@@ -90,71 +91,82 @@ func TestConvertEndpoint(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read body: %v", err)
 		}
-		if len(data) == 0 || data[0] != 0xFF || data[1] != 0xD8 {
+		if len(data) < 2 || data[0] != 0xFF || data[1] != 0xD8 {
 			t.Fatalf("expected jpeg header, got %x", data[:2])
 		}
 	})
 
 	t.Run("missing file", func(t *testing.T) {
-		server := newTestServer(t, successOpener)
-		defer server.Close()
-
+		handler := newTestHandler(t, successOpener, nil, false)
 		body := &bytes.Buffer{}
 		writer := multipart.NewWriter(body)
 		if err := writer.Close(); err != nil {
 			t.Fatalf("close writer: %v", err)
 		}
-
-		res := sendConvertRequest(t, server.URL, body, writer.FormDataContentType(), testAPIKey)
-		assertJSONError(t, res, http.StatusBadRequest, "file field is required")
+		rec := sendConvertRequest(t, handler, body, writer.FormDataContentType(), testAPIKey)
+		assertJSONError(t, rec, http.StatusBadRequest, "file field is required")
 	})
 
 	t.Run("invalid extension", func(t *testing.T) {
-		server := newTestServer(t, successOpener)
-		defer server.Close()
-
+		handler := newTestHandler(t, successOpener, nil, false)
 		body, contentType := createMultipartBody(t, "not-pdf.txt", minimalPDF())
-		res := sendConvertRequest(t, server.URL, body, contentType, testAPIKey)
-		assertJSONError(t, res, http.StatusBadRequest, "file must be a pdf")
+		rec := sendConvertRequest(t, handler, body, contentType, testAPIKey)
+		assertJSONError(t, rec, http.StatusBadRequest, "file must be a pdf")
 	})
 
 	t.Run("unauthorized", func(t *testing.T) {
-		server := newTestServer(t, successOpener)
-		defer server.Close()
-
+		handler := newTestHandler(t, successOpener, nil, false)
 		body, contentType := createMultipartBody(t, expectedFileName, minimalPDF())
-		res := sendConvertRequest(t, server.URL, body, contentType, "bad-key")
-		assertJSONError(t, res, http.StatusUnauthorized, "unauthorized")
+		rec := sendConvertRequest(t, handler, body, contentType, "bad-key")
+		assertJSONError(t, rec, http.StatusUnauthorized, "unauthorized")
 	})
 
 	t.Run("file too large", func(t *testing.T) {
-		server := newTestServer(t, successOpener)
-		defer server.Close()
-
-		oversized := append([]byte("%PDF-1.4\n"), bytes.Repeat([]byte("A"), maxUploadBytes+1)...)
-		body, contentType := createMultipartBody(t, expectedFileName, oversized)
-		res := sendConvertRequest(t, server.URL, body, contentType, testAPIKey)
-		assertJSONError(t, res, http.StatusRequestEntityTooLarge, "file too large")
+		handler := newTestHandler(t, successOpener, nil, false)
+		overSized := append([]byte("%PDF-1.4\n"), bytes.Repeat([]byte("A"), maxUploadBytes+1)...)
+		body, contentType := createMultipartBody(t, expectedFileName, overSized)
+		rec := sendConvertRequest(t, handler, body, contentType, testAPIKey)
+		assertJSONError(t, rec, http.StatusRequestEntityTooLarge, "file too large")
 	})
 
 	t.Run("conversion failure", func(t *testing.T) {
-		server := newTestServer(t, func(string) (service.Document, error) {
-			return &fakeDocument{
-				pages:  1,
-				imgErr: assertError("render failed"),
-			}, nil
-		})
-		defer server.Close()
-
+		handler := newTestHandler(t, func(string) (service.Document, error) {
+			return &fakeDocument{pages: 1, imgErr: assertError("render failed")}, nil
+		}, nil, false)
 		body, contentType := createMultipartBody(t, expectedFileName, minimalPDF())
-		res := sendConvertRequest(t, server.URL, body, contentType, testAPIKey)
-		assertJSONError(t, res, http.StatusInternalServerError, "failed to convert pdf")
+		rec := sendConvertRequest(t, handler, body, contentType, testAPIKey)
+		assertJSONError(t, rec, http.StatusInternalServerError, "failed to convert pdf")
+	})
+
+	t.Run("temporary key usage limit", func(t *testing.T) {
+		repo := newTestRepository()
+		logger := log.New(io.Discard, "", 0)
+		service := auth.NewKeyService(repo, logger, nil, auth.ServiceConfig{})
+		resp, err := service.IssueTemporaryKey(context.Background(), auth.IssueRequest{
+			Label:      "trial",
+			UsageLimit: 1,
+			TTL:        time.Hour,
+			Operator:   "tester",
+		})
+		if err != nil {
+			t.Fatalf("issue temporary key: %v", err)
+		}
+
+		handler := newTestHandler(t, successOpener, service, true)
+		body, contentType := createMultipartBody(t, expectedFileName, minimalPDF())
+		rec := sendConvertRequest(t, handler, body, contentType, resp.Key)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d", rec.Code)
+		}
+
+		body2, contentType2 := createMultipartBody(t, expectedFileName, minimalPDF())
+		rec2 := sendConvertRequest(t, handler, body2, contentType2, resp.Key)
+		assertJSONError(t, rec2, http.StatusTooManyRequests, "usage limit reached")
 	})
 }
 
 func createMultipartBody(t *testing.T, filename string, fileBytes []byte) (*bytes.Buffer, string) {
 	t.Helper()
-
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 	part, err := writer.CreateFormFile(multipartField, filename)
@@ -170,28 +182,21 @@ func createMultipartBody(t *testing.T, filename string, fileBytes []byte) (*byte
 	return body, writer.FormDataContentType()
 }
 
-func sendConvertRequest(t *testing.T, baseURL string, body *bytes.Buffer, contentType, apiKey string) *http.Response {
+func sendConvertRequest(t *testing.T, handler http.Handler, body *bytes.Buffer, contentType, apiKey string) *httptest.ResponseRecorder {
 	t.Helper()
-
-	req, err := http.NewRequest(http.MethodPost, baseURL+"/convert", body)
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
+	req := httptest.NewRequest(http.MethodPost, "/convert", body)
 	req.Header.Set("Content-Type", contentType)
 	if apiKey != "" {
 		req.Header.Set("X-API-Key", apiKey)
 	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	res, err := client.Do(req)
-	if err != nil {
-		t.Fatalf("http request: %v", err)
-	}
-	return res
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
 }
 
-func assertJSONError(t *testing.T, res *http.Response, expectedStatus int, expectedMsg string) {
+func assertJSONError(t *testing.T, rec *httptest.ResponseRecorder, expectedStatus int, expectedMsg string) {
 	t.Helper()
+	res := rec.Result()
 	defer res.Body.Close()
 
 	if res.StatusCode != expectedStatus {
@@ -219,3 +224,100 @@ func minimalPDF() []byte {
 type assertError string
 
 func (e assertError) Error() string { return string(e) }
+
+type testRepository struct {
+	mu   sync.Mutex
+	data map[string]auth.APIKey
+}
+
+func newTestRepository() *testRepository {
+	return &testRepository{data: make(map[string]auth.APIKey)}
+}
+
+func (r *testRepository) CreateTemporaryKey(ctx context.Context, key auth.APIKey) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.data[key.Key]; exists {
+		return errors.New("duplicate")
+	}
+	r.data[key.Key] = key
+	return nil
+}
+
+func (r *testRepository) Get(ctx context.Context, key string) (auth.APIKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	value, ok := r.data[key]
+	if !ok {
+		return auth.APIKey{}, auth.ErrKeyNotFound
+	}
+	return value, nil
+}
+
+func (r *testRepository) Consume(ctx context.Context, key string, now time.Time) (auth.APIKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	value, ok := r.data[key]
+	if !ok {
+		return auth.APIKey{}, auth.ErrKeyNotFound
+	}
+	switch {
+	case value.RevokedAt != nil:
+		return auth.APIKey{}, auth.ErrKeyRevoked
+	case value.IsExpired(now):
+		return auth.APIKey{}, auth.ErrKeyExpired
+	case value.RemainingUsage <= 0:
+		return auth.APIKey{}, auth.ErrKeyExhausted
+	}
+	value.RemainingUsage--
+	r.data[key] = value
+	return value, nil
+}
+
+func (r *testRepository) Revoke(ctx context.Context, key string, now time.Time) (auth.APIKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	value, ok := r.data[key]
+	if !ok {
+		return auth.APIKey{}, auth.ErrKeyNotFound
+	}
+	value.RemainingUsage = 0
+	value.RevokedAt = &now
+	r.data[key] = value
+	return value, nil
+}
+
+func (r *testRepository) Delete(ctx context.Context, key string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.data, key)
+	return nil
+}
+
+func (r *testRepository) DeleteExpired(ctx context.Context, now time.Time, limit int) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	deleted := 0
+	for k, v := range r.data {
+		if deleted >= limit {
+			break
+		}
+		if v.IsExpired(now) {
+			delete(r.data, k)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
+func (r *testRepository) CountActive(ctx context.Context, now time.Time) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, v := range r.data {
+		if v.RevokedAt == nil && !v.IsExpired(now) && v.RemainingUsage > 0 {
+			count++
+		}
+	}
+	return count, nil
+}
